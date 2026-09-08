@@ -375,10 +375,24 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   };
 
   // BUY LISTING
-  const buyListing = (listingId: string) => {
+  const buyListing = async (listingId: string) => {
     try {
       const listing = listings.find((l) => l.id === listingId);
       if (!listing) throw new Error('Anúncio não encontrado.');
+
+      // 0. Execução atômica no banco oficial Supabase via RPC
+      if (isSupabaseConfigured()) {
+        const atomicRes = await SupabaseService.buyMarketplaceListingAtomic({
+          listingId,
+          buyerId: user.id,
+        });
+        if (!atomicRes.success) {
+          throw new Error(atomicRes.error || 'Falha na liquidação atômica da compra no mercado.');
+        }
+        if (atomicRes.newBalanceNXA !== undefined) {
+          EconomyService.updateUserBalance(user.id, 'NXA', atomicRes.newBalanceNXA);
+        }
+      }
 
       const result = MarketplaceService.executeBuy(listing, user);
 

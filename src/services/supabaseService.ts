@@ -88,21 +88,75 @@ class SupabaseServiceClass {
     return Array.from(this.inMemoryProfiles.values());
   }
 
+  public async updateEditableProfile(
+    userId: string,
+    updates: Partial<Pick<NexaUser, 'username' | 'avatar' | 'bio' | 'title' | 'isFirstAccess'>>
+  ): Promise<void> {
+    const existing = this.inMemoryProfiles.get(userId);
+    if (existing) {
+      this.inMemoryProfiles.set(userId, { ...existing, ...updates });
+    }
+
+    if (isSupabaseConfigured()) {
+      try {
+        const payload: Record<string, any> = {
+          updated_at: new Date().toISOString(),
+        };
+        if (updates.username !== undefined) payload.username = updates.username;
+        if (updates.avatar !== undefined) payload.avatar = updates.avatar;
+        if (updates.bio !== undefined) payload.bio = updates.bio;
+        if (updates.title !== undefined) payload.title = updates.title;
+        if (updates.isFirstAccess !== undefined) payload.is_first_access = updates.isFirstAccess;
+
+        const { error } = await supabase
+          .from('profiles')
+          .update(payload)
+          .eq('id', userId);
+
+        if (error) {
+          console.warn('[SupabaseService] Erro ao atualizar perfil editável no Supabase:', error.message);
+        }
+      } catch (err) {
+        console.warn('[SupabaseService] Exceção no updateEditableProfile:', err);
+      }
+    }
+  }
+
   public async upsertProfile(user: NexaUser): Promise<NexaUser> {
     this.inMemoryProfiles.set(user.id, user);
 
     if (isSupabaseConfigured()) {
       try {
-        const row = mapNexaUserToProfileRow(user);
-        const { error } = await supabase
+        // Verifica se o perfil já existe no Supabase
+        const { data: existing } = await supabase
           .from('profiles')
-          .upsert(row, { onConflict: 'id' });
+          .select('id')
+          .eq('id', user.id)
+          .maybeSingle();
 
-        if (error) {
-          console.warn('[SupabaseService] Erro ao sincronizar perfil no Supabase:', error.message);
+        if (existing) {
+          // NUNCA sobrescrever colunas econômicas via upsertProfile!
+          // Atualiza apenas dados de perfil do usuário (bio, title, avatar, etc)
+          await this.updateEditableProfile(user.id, {
+            username: user.username,
+            avatar: user.avatar,
+            bio: user.bio,
+            title: user.title,
+            isFirstAccess: user.isFirstAccess,
+          });
+        } else {
+          // Se for inserção inicial do perfil (novo registro)
+          const row = mapNexaUserToProfileRow(user);
+          const { error } = await supabase
+            .from('profiles')
+            .insert(row);
+
+          if (error) {
+            console.warn('[SupabaseService] Erro ao inserir perfil inicial no Supabase:', error.message);
+          }
         }
       } catch (err) {
-        console.warn('[SupabaseService] Exceção no upsertProfile:', err);
+        console.warn('[SupabaseService] Exceção no upsertProfile seguro:', err);
       }
     }
 

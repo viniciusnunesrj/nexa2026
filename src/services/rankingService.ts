@@ -1,4 +1,6 @@
 import { NexaUser } from '../types';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { mapProfileToNexaUser } from '../lib/supabaseMappers';
 import { EconomyService } from './economyService';
 import { authService } from './authService';
 
@@ -71,19 +73,74 @@ export function sortRankingEntries(a: RankingEntry, b: RankingEntry): number {
 }
 
 class RankingServiceClass {
+  private cachedOnlineProfiles: NexaUser[] = [];
+  private isFetching = false;
+
+  constructor() {
+    if (typeof window !== 'undefined' && isSupabaseConfigured()) {
+      this.fetchOnlineGlobalRanking().catch(() => {});
+    }
+  }
+
   /**
-   * Obtém a lista oficial do ranking global calculada dinamicamente
-   * a partir da fonte real de usuários do sistema.
-   * Não utiliza snapshot estático, integrando novos usuários imediatamente.
+   * Busca diretamente os perfis oficiais da tabela public.profiles no Supabase
+   * e ordena todos os jogadores globalmente (fonte única de verdade online).
+   */
+  public async fetchOnlineGlobalRanking(currentUserId?: string): Promise<GlobalRankingResult> {
+    if (isSupabaseConfigured()) {
+      try {
+        this.isFetching = true;
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('*')
+          .order('level', { ascending: false });
+
+        if (error) {
+          console.warn('[RankingService] Erro ao consultar public.profiles no Supabase:', error.message);
+        } else if (data && data.length > 0) {
+          this.cachedOnlineProfiles = data.map(mapProfileToNexaUser);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new Event('nexa_ranking_updated'));
+          }
+          return this.computeRankingFromUsers(this.cachedOnlineProfiles, currentUserId);
+        }
+      } catch (err) {
+        console.warn('[RankingService] Exceção ao consultar ranking Supabase:', err);
+      } finally {
+        this.isFetching = false;
+      }
+    }
+
+    return this.getGlobalRanking(currentUserId);
+  }
+
+  /**
+   * Calcula o ranking global com os dados em cache do Supabase ou fallback offline.
    */
   public getGlobalRanking(currentUserId?: string): GlobalRankingResult {
-    // Fonte da verdade: contas de usuários reais persistidas
+    // Fonte primária: perfis reais baixados do Supabase
+    if (this.cachedOnlineProfiles.length > 0) {
+      return this.computeRankingFromUsers(this.cachedOnlineProfiles, currentUserId);
+    }
+
+    // Se ainda não buscou do Supabase mas está configurado, dispara busca assíncrona
+    if (isSupabaseConfigured() && !this.isFetching) {
+      this.fetchOnlineGlobalRanking(currentUserId).catch(() => {});
+    }
+
+    // Fallback secundário isolado para desenvolvimento offline
     let users: NexaUser[] = EconomyService.getAllUsers();
     if (!users || users.length === 0) {
       users = authService.getAllUsers();
     }
 
-    // Mapeia e normaliza cada usuário (migração segura sem perda de dados)
+    return this.computeRankingFromUsers(users, currentUserId);
+  }
+
+  /**
+   * Constrói e ordena a tabela de ranking a partir da lista de usuários
+   */
+  private computeRankingFromUsers(users: NexaUser[], currentUserId?: string): GlobalRankingResult {
     const rawEntries: Omit<RankingEntry, 'rank'>[] = users.map((u) => {
       const level = typeof u.level === 'number' && !isNaN(u.level) && u.level > 0 ? u.level : 1;
       const xp = typeof u.experience === 'number' && !isNaN(u.experience)
@@ -132,7 +189,7 @@ class RankingServiceClass {
       };
     });
 
-    // Ordenação estrita
+    // Ordenação estrita: 1. rankingScore, 2. level, 3. xp, 4. wins
     rawEntries.sort((a, b) => sortRankingEntries(a as RankingEntry, b as RankingEntry));
 
     // Atribuição de posições (1-indexed)

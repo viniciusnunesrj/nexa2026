@@ -21,8 +21,10 @@ export const Leaderboard: React.FC = () => {
   const [search, setSearch] = useState('');
   const [tick, setTick] = useState(0);
 
-  // Auto-refresh and event listener for real-time reactivity
+  // Auto-refresh and event listener for real-time reactivity directly from Supabase
   useEffect(() => {
+    RankingService.fetchOnlineGlobalRanking(user?.id).then(() => setTick((t) => t + 1));
+
     const handleRankingUpdate = () => {
       setTick((t) => t + 1);
     };
@@ -30,15 +32,17 @@ export const Leaderboard: React.FC = () => {
     window.addEventListener('storage', handleRankingUpdate);
     window.addEventListener('nexa_ranking_updated', handleRankingUpdate);
 
-    // Periodic safety poll
-    const interval = setInterval(handleRankingUpdate, 2500);
+    // Periodic safety poll from Supabase
+    const interval = setInterval(() => {
+      RankingService.fetchOnlineGlobalRanking(user?.id).then(() => setTick((t) => t + 1));
+    }, 4000);
 
     return () => {
       window.removeEventListener('storage', handleRankingUpdate);
       window.removeEventListener('nexa_ranking_updated', handleRankingUpdate);
       clearInterval(interval);
     };
-  }, []);
+  }, [user?.id]);
 
   // Compute live ranking dynamically from real database
   const rankingData = useMemo(() => {

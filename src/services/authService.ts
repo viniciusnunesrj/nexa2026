@@ -231,13 +231,20 @@ class AuthServiceClass {
         });
 
         if (authError) {
-          // If auth fails with message, return error
-          console.warn('[AuthService] Supabase Auth signUp:', authError.message);
-        } else if (authData?.user?.id) {
+          return {
+            success: false,
+            error: authError.message || 'Falha ao registrar usuário no Supabase Auth.',
+          };
+        }
+
+        if (authData?.user?.id) {
           assignedUserId = authData.user.id;
         }
-      } catch (err) {
-        console.warn('[AuthService] Supabase Auth exception:', err);
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err?.message || 'Erro de conexão com o Supabase Auth.',
+        };
       }
     }
 
@@ -273,13 +280,14 @@ class AuthServiceClass {
       salt,
     };
 
-    // Save locally and to Supabase profiles
-    accounts.push(newStoredAccount);
-    this.saveStoredAccounts(accounts);
-
+    // Save initial profile to Supabase if configured
     if (isSupabaseConfigured()) {
       await SupabaseService.upsertProfile(newUser);
     }
+
+    // Cache locally for fast UI response
+    accounts.push(newStoredAccount);
+    this.saveStoredAccounts(accounts);
 
     // 7. Grant starter kit: 1 common character + 1 initial item + 1 Recruit Box
     this.grantStarterKit(newUser);
@@ -358,21 +366,40 @@ class AuthServiceClass {
       return { success: false, error: 'Informe seu nome de usuário ou e-mail.' };
     }
 
-    // 1. Try Supabase Auth first if configured
-    if (isSupabaseConfigured() && password) {
+    // 1. Quando o Supabase estiver configurado, a autenticação oficial é SEMPRE o Supabase Auth.
+    // O localStorage NUNCA deve validar login ou autenticar credenciais quando o Supabase estiver ativo.
+    if (isSupabaseConfigured()) {
+      // Caso especial isolado: conta demo para testes locais quando explicitamente solicitada
+      if (cleanId === 'demo' && (!password || password === 'demo123')) {
+        const demoProfile = await SupabaseService.fetchProfile('usr_demo');
+        if (demoProfile) {
+          EconomyService.hydrateProfileFromSupabase(demoProfile);
+          this.setSession(demoProfile);
+          return { success: true, user: demoProfile };
+        }
+      }
+
+      if (!password) {
+        return { success: false, error: 'A senha de acesso é obrigatória.' };
+      }
+
       try {
         let emailToAuth = cleanId;
         if (!cleanId.includes('@')) {
-          // Resolve email from profiles table
-          const { data: profile } = await supabase
+          // Resolve email do usuário a partir da tabela profiles no Supabase
+          const { data: profile, error: searchError } = await supabase
             .from('profiles')
             .select('email, id')
             .ilike('username', cleanId)
             .maybeSingle();
 
-          if (profile?.email) {
-            emailToAuth = profile.email;
+          if (searchError || !profile?.email) {
+            return {
+              success: false,
+              error: 'Piloto não encontrado. Verifique seu nome de usuário ou crie sua conta.',
+            };
           }
+          emailToAuth = profile.email;
         }
 
         const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
@@ -380,20 +407,33 @@ class AuthServiceClass {
           password,
         });
 
-        if (!authError && authData?.user) {
-          const profile = await SupabaseService.fetchProfile(authData.user.id);
-          if (profile) {
-            EconomyService.hydrateProfileFromSupabase(profile);
-            this.setSession(profile);
-            return { success: true, user: profile };
-          }
+        if (authError || !authData?.user) {
+          return {
+            success: false,
+            error: authError?.message || 'Código de acesso incorreto ou usuário inválido.',
+          };
         }
-      } catch (err) {
-        console.warn('[AuthService] Supabase signInWithPassword:', err);
+
+        const profile = await SupabaseService.fetchProfile(authData.user.id);
+        if (profile) {
+          EconomyService.hydrateProfileFromSupabase(profile);
+          this.setSession(profile);
+          return { success: true, user: profile };
+        }
+
+        return {
+          success: false,
+          error: 'Perfil oficial não encontrado no banco de dados Supabase.',
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err?.message || 'Erro de conexão com o Supabase Auth.',
+        };
       }
     }
 
-    // 2. Match in stored accounts
+    // 2. Fallback isolado SOMENTE quando offline / Supabase não configurado
     const accounts = this.getStoredAccounts();
     const account = accounts.find(
       (a) => a.username.toLowerCase() === cleanId || a.email.toLowerCase() === cleanId
@@ -474,7 +514,15 @@ class AuthServiceClass {
     }
 
     if (isSupabaseConfigured()) {
-      SupabaseService.upsertProfile(updatedUser).catch(() => {});
+      // APENAS atualiza colunas de perfil editáveis (bio, título, avatar, username)
+      // NUNCA sobrescreve colunas econômicas protegidas!
+      SupabaseService.updateEditableProfile(updatedUser.id, {
+        username: updatedUser.username,
+        avatar: updatedUser.avatar,
+        bio: updatedUser.bio,
+        title: updatedUser.title,
+        isFirstAccess: updatedUser.isFirstAccess,
+      }).catch(() => {});
     }
   }
 

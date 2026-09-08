@@ -46,8 +46,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return users.length > 0 ? users : authService.getAllUsers();
   });
 
-  // Refresh user list when needed
-  const refreshUsersList = () => {
+  // Refresh user list from Supabase profiles as source of truth
+  const refreshUsersList = async () => {
+    if (isSupabaseConfigured()) {
+      try {
+        const profiles = await SupabaseService.fetchAllProfiles();
+        if (profiles.length > 0) {
+          setAllUsers(profiles);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new Event('nexa_ranking_updated'));
+          }
+          return;
+        }
+      } catch (err) {
+        console.warn('[AuthContext] Erro ao sincronizar perfis do Supabase:', err);
+      }
+    }
     const users = EconomyService.getAllUsers();
     setAllUsers(users.length > 0 ? users : authService.getAllUsers());
     if (typeof window !== 'undefined') {
@@ -57,31 +71,49 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Mount initialization: sync profiles from Supabase and check active Supabase Auth session
   useEffect(() => {
-    authService.ensureInitialized().then(() => {
-      refreshUsersList();
+    let isMounted = true;
+
+    const initAuth = async () => {
+      await authService.ensureInitialized();
+      await refreshUsersList();
 
       if (isSupabaseConfigured()) {
-        supabase.auth.getSession().then(({ data }) => {
-          if (data?.session?.user) {
-            SupabaseService.fetchProfile(data.session.user.id).then((profile) => {
-              if (profile) {
-                setCurrentUser(profile);
-                refreshUsersList();
-              }
-            });
+        try {
+          const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
+          if (sessionData?.session?.user) {
+            const profile = await SupabaseService.fetchProfile(sessionData.session.user.id);
+            if (profile && isMounted) {
+              EconomyService.hydrateProfileFromSupabase(profile);
+              setCurrentUser(profile);
+              await refreshUsersList();
+            }
+          } else {
+            // Se o Supabase está configurado e NÃO há sessão no Supabase Auth,
+            // desvalida login fake de localStorage (exceto demo offline explícito)
+            const cached = authService.getCurrentUser();
+            if (cached && cached.id !== 'usr_demo' && !cached.id.startsWith('demo')) {
+              authService.logout();
+              if (isMounted) setCurrentUser(null);
+            }
           }
-        });
+        } catch (err) {
+          console.warn('[AuthContext] Falha ao recuperar sessão oficial do Supabase:', err);
+        }
 
         const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
-          if (event === 'SIGNED_IN' && session?.user) {
+          if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') && session?.user) {
             const profile = await SupabaseService.fetchProfile(session.user.id);
-            if (profile) {
+            if (profile && isMounted) {
+              EconomyService.hydrateProfileFromSupabase(profile);
               setCurrentUser(profile);
-              refreshUsersList();
+              await refreshUsersList();
             }
           } else if (event === 'SIGNED_OUT') {
-            setCurrentUser(null);
-            refreshUsersList();
+            if (isMounted) {
+              authService.logout();
+              setCurrentUser(null);
+              await refreshUsersList();
+            }
           }
         });
 
@@ -89,7 +121,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           authListener.subscription.unsubscribe();
         };
       }
-    });
+    };
+
+    initAuth();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const login = async (identifier: string, password?: string): Promise<AuthResult> => {
@@ -146,27 +184,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const updateUserBalance = (deltaNEX: number, deltaNXA: number): NexaUser | undefined => {
     if (!currentUser) return undefined;
-    let fresh = EconomyService.getUser(currentUser.id) || currentUser;
+    // Atualização apenas de visualização / cache local reativo
+    // O banco oficial Supabase só é alterado pelas RPCs SECURITY DEFINER
+    const updated: NexaUser = {
+      ...currentUser,
+      balanceNEX: Math.max(0, currentUser.balanceNEX + deltaNEX),
+      balanceNXA: Math.max(0, currentUser.balanceNXA + deltaNXA),
+    };
 
-    if (deltaNEX !== 0) {
-      if (deltaNEX > 0) {
-        fresh = EconomyService.addCurrency(currentUser.id, 'NEX', deltaNEX);
-      } else {
-        fresh = EconomyService.removeCurrency(currentUser.id, 'NEX', Math.abs(deltaNEX));
-      }
-    }
-
-    if (deltaNXA !== 0) {
-      if (deltaNXA > 0) {
-        fresh = EconomyService.addCurrency(currentUser.id, 'NXA', deltaNXA);
-      } else {
-        fresh = EconomyService.removeCurrency(currentUser.id, 'NXA', Math.abs(deltaNXA));
-      }
-    }
-
-    setCurrentUser(fresh);
-    refreshUsersList();
-    return fresh;
+    EconomyService.hydrateProfileFromSupabase(updated);
+    setCurrentUser(updated);
+    return updated;
   };
 
   const addXP = (amount: number): LevelUpResult | undefined => {
@@ -218,14 +246,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const updateUserProfile = (bio: string, title?: string) => {
     if (!currentUser) return;
-    const latest = EconomyService.getUser(currentUser.id) || currentUser;
     const updated: NexaUser = {
-      ...latest,
+      ...currentUser,
       bio,
-      title: title !== undefined ? title : latest.title,
+      title: title !== undefined ? title : currentUser.title,
     };
-    EconomyService.saveUser(updated);
     setCurrentUser(updated);
+    authService.updateUser(updated);
     refreshUsersList();
   };
 

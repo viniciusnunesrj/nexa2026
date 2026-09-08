@@ -235,10 +235,17 @@ export class EconomyServiceClass {
     this.saveRawAccounts(accounts);
     this.syncActiveSessionIfCurrent(updatedUser);
 
-    // Persiste no Supabase
+    // Persiste apenas campos editáveis do perfil (bio, título, avatar, etc) no Supabase
+    // NUNCA sobrescreve colunas econômicas protegidas
     if (isSupabaseConfigured()) {
-      SupabaseService.upsertProfile(updatedUser).catch((err) =>
-        console.warn('[EconomyService] Erro ao sincronizar no Supabase:', err)
+      SupabaseService.updateEditableProfile(updatedUser.id, {
+        username: updatedUser.username,
+        avatar: updatedUser.avatar,
+        bio: updatedUser.bio,
+        title: updatedUser.title,
+        isFirstAccess: updatedUser.isFirstAccess,
+      }).catch((err) =>
+        console.warn('[EconomyService] Erro ao sincronizar perfil editável no Supabase:', err)
       );
     }
 
@@ -246,8 +253,8 @@ export class EconomyServiceClass {
   }
 
   /**
-   * Atualiza diretamente o saldo de NEX ou NXA de um usuário específico.
-   * O valor nunca fica negativo.
+   * Atualiza diretamente o saldo de NEX ou NXA no cache local não-autoritativo.
+   * O banco de dados oficial Supabase só é alterado pelas RPCs SECURITY DEFINER.
    */
   public updateUserBalance(userId: string, currency: 'NEX' | 'NXA', newBalance: number): NexaUser {
     const safeBalance = Math.max(0, Math.round(newBalance));
@@ -268,13 +275,6 @@ export class EconomyServiceClass {
 
     const { passwordHash, salt, ...userWithoutSecrets } = accounts[index];
     this.syncActiveSessionIfCurrent(userWithoutSecrets);
-
-    // Persiste no Supabase
-    if (isSupabaseConfigured()) {
-      SupabaseService.upsertProfile(userWithoutSecrets).catch((err) =>
-        console.warn('[EconomyService] Erro ao sincronizar saldo no Supabase:', err)
-      );
-    }
 
     return userWithoutSecrets;
   }
